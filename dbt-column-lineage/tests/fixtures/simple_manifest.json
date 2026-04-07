@@ -1,0 +1,48 @@
+{
+  "metadata": {
+    "dbt_version": "1.7.0",
+    "adapter_type": "postgres",
+    "project_name": "jaffle_shop"
+  },
+  "nodes": {
+    "model.jaffle_shop.stg_orders": {
+      "unique_id": "model.jaffle_shop.stg_orders",
+      "name": "stg_orders",
+      "resource_type": "model",
+      "compiled_code": "SELECT id AS order_id, user_id AS customer_id, order_date, status AS order_status FROM raw_orders",
+      "depends_on": {"nodes": ["source.jaffle_shop.raw_orders"], "macros": []},
+      "columns": {},
+      "database": "dev",
+      "schema": "public",
+      "original_file_path": "models/staging/stg_orders.sql"
+    },
+    "model.jaffle_shop.orders": {
+      "unique_id": "model.jaffle_shop.orders",
+      "name": "orders",
+      "resource_type": "model",
+      "compiled_code": "SELECT order_id, customer_id, order_date, order_status, CASE WHEN order_status = 'completed' THEN 1 ELSE 0 END AS is_completed, ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY order_date) AS order_sequence FROM stg_orders",
+      "depends_on": {"nodes": ["model.jaffle_shop.stg_orders"], "macros": []},
+      "columns": {},
+      "database": "dev",
+      "schema": "public",
+      "original_file_path": "models/marts/orders.sql"
+    }
+  },
+  "sources": {
+    "source.jaffle_shop.raw_orders": {
+      "unique_id": "source.jaffle_shop.raw_orders",
+      "name": "raw_orders",
+      "resource_type": "source",
+      "database": "dev",
+      "schema": "public",
+      "columns": {
+        "id": {"name": "id", "description": ""},
+        "user_id": {"name": "user_id", "description": ""},
+        "order_date": {"name": "order_date", "description": ""},
+        "status": {"name": "status", "description": ""}
+      }
+    }
+  },
+  "parent_map": {},
+  "child_map": {}
+}

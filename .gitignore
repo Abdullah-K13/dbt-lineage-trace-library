@@ -1,0 +1,44 @@
+# Claude Code local settings
+.claude/
+
+# dbt artifacts (potentially large / sensitive)
+demo/manifest.json
+demo/catalog.json
+demo/lineage_output.json
+demo/.lineage_*.db
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+*.whl
+
+# Virtual environments
+.venv/
+venv/
+env/
+.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Zip archives
+*.zip
+
+# Test / scratch files
+test.txt
+manifest copy.json

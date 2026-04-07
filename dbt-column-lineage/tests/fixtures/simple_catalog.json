@@ -1,0 +1,59 @@
+{
+  "metadata": {
+    "dbt_schema_version": "https://schemas.getdbt.com/dbt/catalog/v1.json",
+    "dbt_version": "1.7.0",
+    "generated_at": "2024-01-01T00:00:00.000000Z"
+  },
+  "nodes": {
+    "model.jaffle_shop.stg_orders": {
+      "metadata": {
+        "type": "BASE TABLE",
+        "schema": "public",
+        "name": "stg_orders",
+        "database": "dev"
+      },
+      "columns": {
+        "order_id": {"type": "INTEGER", "index": 1, "name": "order_id", "comment": null},
+        "customer_id": {"type": "INTEGER", "index": 2, "name": "customer_id", "comment": null},
+        "order_date": {"type": "DATE", "index": 3, "name": "order_date", "comment": null},
+        "order_status": {"type": "TEXT", "index": 4, "name": "order_status", "comment": null}
+      },
+      "stats": {}
+    },
+    "model.jaffle_shop.orders": {
+      "metadata": {
+        "type": "BASE TABLE",
+        "schema": "public",
+        "name": "orders",
+        "database": "dev"
+      },
+      "columns": {
+        "order_id": {"type": "INTEGER", "index": 1, "name": "order_id", "comment": null},
+        "customer_id": {"type": "INTEGER", "index": 2, "name": "customer_id", "comment": null},
+        "order_date": {"type": "DATE", "index": 3, "name": "order_date", "comment": null},
+        "order_status": {"type": "TEXT", "index": 4, "name": "order_status", "comment": null},
+        "is_completed": {"type": "INTEGER", "index": 5, "name": "is_completed", "comment": null},
+        "order_sequence": {"type": "BIGINT", "index": 6, "name": "order_sequence", "comment": null}
+      },
+      "stats": {}
+    }
+  },
+  "sources": {
+    "source.jaffle_shop.raw_orders": {
+      "metadata": {
+        "type": "BASE TABLE",
+        "schema": "public",
+        "name": "raw_orders",
+        "database": "dev"
+      },
+      "columns": {
+        "id": {"type": "INTEGER", "index": 1, "name": "id", "comment": null},
+        "user_id": {"type": "INTEGER", "index": 2, "name": "user_id", "comment": null},
+        "order_date": {"type": "DATE", "index": 3, "name": "order_date", "comment": null},
+        "status": {"type": "TEXT", "index": 4, "name": "status", "comment": null}
+      },
+      "stats": {}
+    }
+  },
+  "errors": null
+}
