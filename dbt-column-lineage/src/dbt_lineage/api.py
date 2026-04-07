@@ -267,9 +267,14 @@ class LineageGraph:
                         self._stats.partially_analyzed_models.append(model.name)
 
                 for edge in edges:
-                    resolved_source = table_lookup.get(
-                        edge.source.model.lower(), edge.source.model
-                    )
+                    # Literal sentinel edges keep their model name verbatim —
+                    # never resolve through table_lookup.
+                    if edge.source.model == "__literal__":
+                        resolved_source = "__literal__"
+                    else:
+                        resolved_source = table_lookup.get(
+                            edge.source.model.lower(), edge.source.model
+                        )
                     self._graph.add_edge(ColumnEdge(
                         source=ColumnRef(model=resolved_source, column=edge.source.column),
                         target=edge.target,
@@ -289,6 +294,10 @@ class LineageGraph:
                     catalog_type = cumulative_schema.get(model.name, {}).get(col)
                     if catalog_type:
                         output_cols[col] = catalog_type
+                        continue
+                    # Literal sentinel has no real source schema — default to TEXT
+                    if edge.source.model == "__literal__":
+                        output_cols.setdefault(col, "TEXT")
                         continue
                     resolved_source = table_lookup.get(
                         edge.source.model.lower(), edge.source.model

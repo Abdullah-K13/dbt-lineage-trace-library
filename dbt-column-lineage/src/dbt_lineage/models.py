@@ -23,6 +23,7 @@ class TransformType(str, Enum):
     WINDOW = "window"                 # ROW_NUMBER() OVER(), LAG(), LEAD()
     JOIN_DERIVED = "join_derived"     # Column brought in via JOIN condition
     COMPLEX = "complex"               # Nested/compound that doesn't fit above
+    LITERAL = "literal"               # Pure literal / constant (0, 'Stripe', NULL, CURRENT_DATE)
     UNKNOWN = "unknown"               # Could not determine
 
     def __str__(self) -> str:

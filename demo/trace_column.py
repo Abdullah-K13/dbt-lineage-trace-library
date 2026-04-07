@@ -97,11 +97,21 @@ def _status_note(status: str) -> str:
 
 def _print_hop(edge, idx: int, total: int) -> None:
     """Print one hop in the lineage path."""
-    src  = str(edge.source)
-    tgt  = str(edge.target)
     tt   = str(edge.transform_type)
     sql  = (edge.transform_sql or "").strip()
     stat = str(edge.resolution_status)
+
+    # Literal sentinel: show differently — no fake source column label
+    if edge.source.model == "__literal__":
+        tgt = str(edge.target)
+        print(f"  [{idx:>2}/{total}]  <literal>  {sql!r:<44}{ARROW}{tgt}")
+        print(f"         Transform : literal  (constant, no upstream column)")
+        print(f"         Value     : {sql}")
+        print()
+        return
+
+    src  = str(edge.source)
+    tgt  = str(edge.target)
 
     label = _transform_label(tt, edge.source.column, edge.target.column)
     status_note = _status_note(stat)
@@ -211,7 +221,13 @@ def trace_column(g, model_name: str, col_name: str) -> None:
     print(SEP)
 
     # ── 1. Root sources ───────────────────────────────────────────────────────
-    print(f"\n  ROOT SOURCES  ({len(result.source_columns)} ultimate source(s))")
+    # Separate real sources from literals
+    literal_edges = [e for e in result.edges if e.source.model == "__literal__"]
+    real_source_cols = [c for c in result.source_columns if c.model != "__literal__"]
+    literal_source_cols = [c for c in result.source_columns if c.model == "__literal__"]
+
+    print(f"\n  ROOT SOURCES  ({len(real_source_cols)} upstream column(s)"
+          + (f", {len(literal_source_cols)} literal(s)" if literal_source_cols else "") + ")")
     print(f"  {THIN}")
     if not result.source_columns:
         print("  (none — column may be a literal or the graph has no edges for it)")
@@ -219,12 +235,24 @@ def trace_column(g, model_name: str, col_name: str) -> None:
         print("  ensure catalog.json covers the upstream tables).")
     else:
         source_groups = _group_edges_by_source_model(
-            [e for e in result.edges if e.source.model not in {e2.target.model for e2 in result.edges}]
+            [e for e in result.edges
+             if e.source.model != "__literal__"
+             and e.source.model not in {e2.target.model for e2 in result.edges}]
         )
         for model, model_edges in sorted(source_groups.items()):
             cols = sorted({e.source.column for e in model_edges})
             for col in cols:
                 print(f"    {model}.{col}")
+        # Show literals as a distinct group
+        if literal_source_cols:
+            print(f"  LITERAL VALUES  (constant expressions with no upstream column)")
+            print(f"  {THIN}")
+            seen_lits: set[tuple] = set()
+            for e in literal_edges:
+                key = (e.target.model, e.target.column, e.source.column)
+                if key not in seen_lits:
+                    seen_lits.add(key)
+                    print(f"    {e.target.model}.{e.target.column}  =  {e.source.column}")
 
     # ── 2. Hop-by-hop path ────────────────────────────────────────────────────
     if not result.edges:
@@ -242,13 +270,17 @@ def trace_column(g, model_name: str, col_name: str) -> None:
 
     # ── 3. Transform type summary ─────────────────────────────────────────────
     from collections import Counter
-    type_counts = Counter(str(e.transform_type) for e in result.edges)
-    status_counts = Counter(str(e.resolution_status) for e in result.edges)
+    non_literal_edges = [e for e in result.edges if e.source.model != "__literal__"]
+    literal_edges_all = [e for e in result.edges if e.source.model == "__literal__"]
+    type_counts = Counter(str(e.transform_type) for e in non_literal_edges)
+    status_counts = Counter(str(e.resolution_status) for e in non_literal_edges)
 
     print(f"  {THIN}")
     print(f"  TRANSFORM SUMMARY")
     for t, count in type_counts.most_common():
         print(f"    {t:<18} {count:>4} hop(s)")
+    if literal_edges_all:
+        print(f"    {'literal':<18} {len(literal_edges_all):>4} hop(s)  (constant values, no upstream column)")
 
     # ── 4. Resolution status ──────────────────────────────────────────────────
     print()
@@ -261,10 +293,22 @@ def trace_column(g, model_name: str, col_name: str) -> None:
             flag = "  <- literal / unsupported construct, no source column exists"
         print(f"    {s:<14} {count:>4} hop(s){flag}")
 
-    # ── 5. Derivation note for renamed / cross-column edges ───────────────────
+    # ── 5. Literal values summary ─────────────────────────────────────────────
+    if literal_edges_all:
+        print()
+        print(f"  LITERAL VALUES  (columns with constant / hardcoded values)")
+        seen_lit: set[tuple] = set()
+        for e in literal_edges_all:
+            key = (e.target.model, e.target.column)
+            if key not in seen_lit:
+                seen_lit.add(key)
+                print(f"    {e.target.model}.{e.target.column}  =  {e.source.column}")
+
+    # ── 6. Derivation note for renamed / cross-column edges ───────────────────
     rename_hops = [
         e for e in result.edges
-        if e.source.column.lower() != e.target.column.lower()
+        if e.source.model != "__literal__"
+        and e.source.column.lower() != e.target.column.lower()
     ]
     if rename_hops:
         print()

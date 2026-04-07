@@ -54,6 +54,7 @@ _TYPE_PRIORITY: dict[TransformType, int] = {
     TransformType.FUNCTION:    3,
     TransformType.RENAME:      2,
     TransformType.COMPLEX:     1,
+    TransformType.LITERAL:     1,  # Show literal over passthrough
     TransformType.PASSTHROUGH: 0,
     TransformType.UNKNOWN:     0,
 }
@@ -65,6 +66,24 @@ _MAX_WORKERS = 1  # SQLGlot is CPU-bound Python; threading adds GIL contention o
 # Max columns to trace per model. Models with more columns are capped to
 # avoid runaway analysis time. Override with DBT_LINEAGE_MAX_COLUMNS env var.
 _MAX_COLUMNS_PER_MODEL = int(os.environ.get("DBT_LINEAGE_MAX_COLUMNS", "60"))
+
+# Sentinel model name for pure literal / constant column values.
+# Edges with this as the source have no upstream column — the value is the SQL
+# literal itself (e.g. 0, 'Stripe', NULL, CURRENT_DATE).
+_LITERAL_MODEL = "__literal__"
+
+
+def _is_literal_expr(expr: exp.Expression | None) -> bool:
+    """Return True when *expr* is a pure literal with no column references.
+
+    Examples that return True:
+        0, 1, 'Stripe', NULL, CAST(NULL AS FLOAT64), CURRENT_DATE, TRUE
+    Examples that return False:
+        col, COALESCE(col, 0), col * 2, CASE WHEN col > 0 THEN 1 ELSE 0 END
+    """
+    if expr is None:
+        return False
+    return len(list(expr.find_all(exp.Column))) == 0
 
 
 @dataclass
@@ -200,6 +219,10 @@ def classify_transform(expression: exp.Expression | None) -> TransformType:
 
     if isinstance(expression, exp.Func):
         return TransformType.FUNCTION
+
+    # Pure literal / constant — no column references anywhere in the expression
+    if _is_literal_expr(expression):
+        return TransformType.LITERAL
 
     return TransformType.COMPLEX
 
@@ -516,6 +539,21 @@ def _trace_one_column(
             transform_chain=chain,
         ))
 
+    # No source table found — check if the root expression is a pure literal
+    # and emit a sentinel edge so the column appears in the lineage graph.
+    if not edges:
+        root_expr = getattr(root_node, "expression", None)
+        if root_expr is not None and _is_literal_expr(root_expr):
+            lit_sql = root_expr.sql(dialect=dialect) if dialect else root_expr.sql()
+            edges.append(ColumnEdge(
+                source=ColumnRef(model=_LITERAL_MODEL, column=lit_sql or col_name),
+                target=ColumnRef(model=model_name, column=col_name),
+                transform_sql=lit_sql or col_name,
+                transform_type=TransformType.LITERAL,
+                transform_chain=chain,
+                resolution_status=ResolutionStatus.RESOLVED,
+            ))
+
     return edges, True
 
 
@@ -638,12 +676,16 @@ def _resolve_col_through_cte(
                 continue
             found_explicit = True
             inner = sel_expr.this if isinstance(sel_expr, exp.Alias) else sel_expr
-            results.extend(
-                _resolve_expr_sources(
-                    inner, cte_map, effective_alias_map, table_lookup,
-                    depth + 1, scope=branch_scope,
-                )
+            sources = _resolve_expr_sources(
+                inner, cte_map, effective_alias_map, table_lookup,
+                depth + 1, scope=branch_scope,
             )
+            results.extend(sources)
+            # Pure literal — no column references found.  Return a sentinel so
+            # callers know this branch has a constant value.
+            if not sources and _is_literal_expr(inner if inner is not None else sel_expr):
+                lit_sql = (inner or sel_expr).sql(dialect=dialect)
+                results.append((_LITERAL_MODEL, lit_sql, ResolutionStatus.RESOLVED))
 
         # If no explicit match, check for SELECT * — the column may pass through
         # from a source that uses a bare star (e.g. SELECT *, extra_col FROM src).
@@ -866,6 +908,18 @@ def _single_pass_analyze_ast(
                     if not source_table:
                         # AMBIGUOUS — skip inserting a misleading edge
                         continue
+                    # Literal sentinel: override transform type and SQL so the
+                    # edge reflects the constant value, not a passthrough hop.
+                    if source_table == _LITERAL_MODEL:
+                        edges.append(ColumnEdge(
+                            source=ColumnRef(model=_LITERAL_MODEL, column=source_col),
+                            target=ColumnRef(model=model_name, column=col_name),
+                            transform_sql=source_col,
+                            transform_type=TransformType.LITERAL,
+                            transform_chain=[],
+                            resolution_status=res_status,
+                        ))
+                        continue
                     edges.append(ColumnEdge(
                         source=ColumnRef(model=source_table, column=source_col),
                         target=ColumnRef(model=model_name, column=col_name),
@@ -873,6 +927,18 @@ def _single_pass_analyze_ast(
                         transform_type=transform_type,
                         transform_chain=[],
                         resolution_status=res_status,
+                    ))
+
+                # No source found — emit a literal sentinel edge so the column
+                # is still visible in the lineage graph with its SQL value.
+                if not sources and _is_literal_expr(inner if inner is not None else sel_expr):
+                    edges.append(ColumnEdge(
+                        source=ColumnRef(model=_LITERAL_MODEL, column=transform_sql),
+                        target=ColumnRef(model=model_name, column=col_name),
+                        transform_sql=transform_sql,
+                        transform_type=TransformType.LITERAL,
+                        transform_chain=[],
+                        resolution_status=ResolutionStatus.RESOLVED,
                     ))
 
         return edges
