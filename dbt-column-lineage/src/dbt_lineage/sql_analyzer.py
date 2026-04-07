@@ -643,11 +643,15 @@ def _resolve_col_through_cte(
     table_lookup: dict[str, str] | None,
     dialect: str | None,
     depth: int,
-) -> list[tuple[str, str, ResolutionStatus]]:
+) -> list[tuple[str, str, ResolutionStatus, str | None]]:
     """Find what col_name maps to inside a CTE body (handles UNION ALL).
 
-    Returns a list of (source_table, source_col, status) triples gathered from
-    every SELECT branch of the CTE (UNION ALL branches included).
+    Returns a list of (source_table, source_col, status, branch_sql) tuples
+    gathered from every SELECT branch of the CTE (UNION ALL branches included).
+
+    branch_sql is the SQL expression from the specific branch where this source
+    was found (e.g. ``petpay_snapshot.amt_petpay_fee_incl_vat / 100.0``), or
+    None for simple passthrough / SELECT * cases.
 
     Per-branch SelectScope
     ----------------------
@@ -657,7 +661,7 @@ def _resolve_col_through_cte(
     - Single-source unqualified column attribution
     - Multi-source ambiguity detection
     """
-    results: list[tuple[str, str, ResolutionStatus]] = []
+    results: list[tuple[str, str, ResolutionStatus, str | None]] = []
     col_lower = col_name.lower()
 
     for select in _flatten_union(cte_query):
@@ -676,16 +680,28 @@ def _resolve_col_through_cte(
                 continue
             found_explicit = True
             inner = sel_expr.this if isinstance(sel_expr, exp.Alias) else sel_expr
+
+            # Compute per-branch SQL for this expression.  Only attach it when
+            # the expression is non-trivial (not a bare column reference) so
+            # that callers can use it instead of the global CTE transform SQL.
+            is_passthrough = isinstance(inner, exp.Column)
+            branch_sql: str | None = None
+            if not is_passthrough and inner is not None:
+                branch_sql = inner.sql(dialect=dialect) or None
+
             sources = _resolve_expr_sources(
                 inner, cte_map, effective_alias_map, table_lookup,
                 depth + 1, scope=branch_scope,
             )
-            results.extend(sources)
+            # Propagate branch_sql to each source from this branch
+            for st, sc, ss, *rest in sources:
+                inherited = rest[0] if rest else None
+                results.append((st, sc, ss, inherited or branch_sql))
             # Pure literal — no column references found.  Return a sentinel so
             # callers know this branch has a constant value.
             if not sources and _is_literal_expr(inner if inner is not None else sel_expr):
                 lit_sql = (inner or sel_expr).sql(dialect=dialect)
-                results.append((_LITERAL_MODEL, lit_sql, ResolutionStatus.RESOLVED))
+                results.append((_LITERAL_MODEL, lit_sql, ResolutionStatus.RESOLVED, lit_sql))
 
         # If no explicit match, check for SELECT * — the column may pass through
         # from a source that uses a bare star (e.g. SELECT *, extra_col FROM src).
@@ -721,7 +737,7 @@ def _resolve_col_through_cte(
                             )
                         )
                     else:
-                        results.append((ref, col_name, ResolutionStatus.RESOLVED))
+                        results.append((ref, col_name, ResolutionStatus.RESOLVED, None))
 
     return results
 
@@ -733,8 +749,11 @@ def _resolve_expr_sources(
     table_lookup: dict[str, str] | None,
     depth: int = 0,
     scope: SelectScope | None = None,
-) -> list[tuple[str, str, ResolutionStatus]]:
-    """Walk expr's Column leaf nodes and resolve each to (source_table, source_col, status).
+) -> list[tuple[str, str, ResolutionStatus, str | None]]:
+    """Walk expr's Column leaf nodes and resolve each to (source_table, source_col, status, branch_sql).
+
+    branch_sql (4th element) carries the SQL expression from the specific CTE
+    branch where this source was found, or None for direct table references.
 
     Resolution order per column node
     ---------------------------------
@@ -750,7 +769,7 @@ def _resolve_expr_sources(
     if depth > 15:
         return []
 
-    results: list[tuple[str, str, ResolutionStatus]] = []
+    results: list[tuple[str, str, ResolutionStatus, str | None]] = []
 
     # Collect Column nodes that only appear inside PARTITION BY / ORDER BY of
     # window functions.  These are grouping keys, not value contributors, so
@@ -772,18 +791,17 @@ def _resolve_expr_sources(
                 # Single table in scope — unambiguous attribution
                 real = scope.single_source
                 if real.lower() in cte_map:
-                    for st, sc, ss in _resolve_col_through_cte(
+                    results.extend(_resolve_col_through_cte(
                         cte_map[real.lower()], col_name, cte_map, alias_map,
                         table_lookup, None, depth,
-                    ):
-                        results.append((st, sc, ss))
+                    ))
                 else:
                     if table_lookup:
                         real = table_lookup.get(real.lower(), real)
-                    results.append((real, col_name, ResolutionStatus.RESOLVED))
+                    results.append((real, col_name, ResolutionStatus.RESOLVED, None))
             elif scope is not None and scope.relations:
                 # Multiple tables in scope — ambiguous
-                results.append(("", col_name, ResolutionStatus.AMBIGUOUS))
+                results.append(("", col_name, ResolutionStatus.AMBIGUOUS, None))
             # else: no scope info → skip silently
             continue
 
@@ -799,28 +817,26 @@ def _resolve_expr_sources(
         canonical_lower = canonical.lower()
 
         if canonical_lower in cte_map:
-            for st, sc, ss in _resolve_col_through_cte(
+            results.extend(_resolve_col_through_cte(
                 cte_map[canonical_lower], col_name, cte_map, alias_map,
                 table_lookup, None, depth,
-            ):
-                results.append((st, sc, ss))
+            ))
         else:
             # Check alias_map again in case scope didn't resolve it
             if canonical_lower not in (scope.relations if scope else {}):
                 via_alias = alias_map.get(col_table, col_table)
                 if via_alias.lower() != col_table and via_alias.lower() in cte_map:
-                    for st, sc, ss in _resolve_col_through_cte(
+                    results.extend(_resolve_col_through_cte(
                         cte_map[via_alias.lower()], col_name, cte_map, alias_map,
                         table_lookup, None, depth,
-                    ):
-                        results.append((st, sc, ss))
+                    ))
                     continue
             # Real table — resolve qualified name to short model name
             resolved = canonical
             if table_lookup and resolved:
                 resolved = table_lookup.get(resolved.lower(), resolved)
             if resolved:
-                results.append((resolved, col_name, ResolutionStatus.RESOLVED))
+                results.append((resolved, col_name, ResolutionStatus.RESOLVED, None))
 
     return results
 
@@ -904,7 +920,7 @@ def _single_pass_analyze_ast(
                     scope=outer_scope,
                 )
 
-                for source_table, source_col, res_status in sources:
+                for source_table, source_col, res_status, branch_sql in sources:
                     if not source_table:
                         # AMBIGUOUS — skip inserting a misleading edge
                         continue
@@ -920,11 +936,35 @@ def _single_pass_analyze_ast(
                             resolution_status=res_status,
                         ))
                         continue
+                    # Use per-branch SQL when available (non-trivial CTE expression).
+                    # This ensures each UNION ALL branch shows its own formula rather
+                    # than the global transform SQL picked by _collect_cte_transform.
+                    if branch_sql:
+                        edge_sql = branch_sql
+                        # Re-classify using the branch-specific expression SQL so the
+                        # transform type is accurate for this particular source.
+                        try:
+                            branch_expr = sqlglot.parse_one(branch_sql, dialect=dialect)
+                            branch_type = classify_transform(branch_expr)
+                            edge_type = (branch_type
+                                         if branch_type not in (TransformType.PASSTHROUGH, TransformType.UNKNOWN)
+                                         else transform_type)
+                        except Exception:
+                            edge_type = transform_type
+                    else:
+                        # No branch-specific SQL — this is a passthrough/rename in this
+                        # specific branch.  Avoid inheriting a formula from a different
+                        # UNION branch (which _collect_cte_transform may have picked).
+                        # Use the source column itself as the SQL.
+                        edge_sql = source_col
+                        edge_type = (TransformType.RENAME
+                                     if source_col.lower() != col_name.lower()
+                                     else TransformType.PASSTHROUGH)
                     edges.append(ColumnEdge(
                         source=ColumnRef(model=source_table, column=source_col),
                         target=ColumnRef(model=model_name, column=col_name),
-                        transform_sql=transform_sql,
-                        transform_type=transform_type,
+                        transform_sql=edge_sql,
+                        transform_type=edge_type,
                         transform_chain=[],
                         resolution_status=res_status,
                     ))
